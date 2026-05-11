@@ -89,7 +89,7 @@ Authentication is **not required** for search, browse, and playback. However, ad
    - Open DevTools (F12) → **Network** tab → reload the page
    - Click the first request → find the `Cookie:` header → copy the full value
 4. Paste the cookie into the **Cookie header** field
-5. **Brand accounts:** If your YouTube Music library is on a brand account, enter your brand account ID in the **Brand account ID** field. Find it at [myaccount.google.com/brandaccounts](https://myaccount.google.com/brandaccounts) or check the `X-Goog-PageId` header in DevTools.
+5. **Brand accounts:** If your YouTube Music library is on a brand account, enter your brand account ID in the **Brand account ID** field. Find it at [myaccount.google.com/brandaccounts](https://myaccount.google.com/brandaccounts) or check the `X-Goog-PageId` header in DevTools. After logging into your Google account and selecting the correct Brand account you will find it here: ```https://myaccount.google.com/brandaccounts/THISISYOURIDRIGHTHERE/view```.
 6. Click **Save**
 
 The cookie must contain `__Secure-3PAPISID`, `SID`, `HSID`, and `SSID`. Cookies are valid for approximately 2 years unless you log out.
