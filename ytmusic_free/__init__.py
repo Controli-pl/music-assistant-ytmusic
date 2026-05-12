@@ -718,14 +718,21 @@ class YoutubeMusicFreeProvider(MusicProvider):
         try:
             if item.media_type == MediaType.ARTIST:
                 await asyncio.to_thread(self._ytmusic.subscribe_artists, [item_id])
-            elif item.media_type == MediaType.ALBUM:
-                await asyncio.to_thread(self._ytmusic.rate_playlist, item_id, "LIKE")
-            elif item.media_type == MediaType.PLAYLIST:
+            elif item.media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
                 await asyncio.to_thread(self._ytmusic.rate_playlist, item_id, "LIKE")
             else:
                 return False
             return True
         except Exception as err:
+            # HTTP 403 typically means the item is already in the user's library
+            # (e.g. a playlist they own — YouTube refuses to "like" your own playlist).
+            # Treat this as a benign no-op so MA's library cache stays consistent.
+            if "403" in str(err) and item.media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
+                self.logger.debug(
+                    "library_add for %s returned 403 (likely user-owned, already in library)",
+                    item_id,
+                )
+                return True
             self.logger.warning("library_add failed for %s: %s", item_id, err)
             return False
 
@@ -744,6 +751,14 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 return False
             return True
         except Exception as err:
+            # HTTP 403 typically means the item is user-owned and cannot be
+            # un-rated — for MA's purposes the "not in library" state is satisfied.
+            if "403" in str(err) and media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
+                self.logger.debug(
+                    "library_remove for %s returned 403 (likely user-owned)",
+                    prov_item_id,
+                )
+                return True
             self.logger.warning("library_remove failed for %s: %s", prov_item_id, err)
             return False
 
