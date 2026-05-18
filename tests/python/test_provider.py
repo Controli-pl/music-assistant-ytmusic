@@ -685,3 +685,294 @@ def test_recommendations_empty_when_not_authenticated(provider):
     provider._authenticated = False
     result = asyncio.run(provider.recommendations())
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# library_add / library_remove — 403 no-op for user-owned items
+# ---------------------------------------------------------------------------
+
+
+def _make_authed_provider_with_rate_failure(provider, error: Exception):
+    provider._authenticated = True
+    mock = MagicMock()
+    mock.rate_playlist = MagicMock(side_effect=error)
+    mock.subscribe_artists = MagicMock(side_effect=error)
+    mock.unsubscribe_artists = MagicMock(side_effect=error)
+    provider._ytmusic = mock
+    return mock
+
+
+def _make_item(media_type, item_id):
+    item = MagicMock()
+    item.media_type = media_type
+    mapping = MagicMock()
+    mapping.provider_instance = provider_instance_id_for_tests
+    mapping.item_id = item_id
+    item.provider_mappings = [mapping]
+    return item
+
+
+provider_instance_id_for_tests = "test_instance"
+
+
+def test_library_add_treats_403_on_playlist_as_no_op(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 403: Forbidden.")
+    )
+    item = _make_item(MediaType.PLAYLIST, "PL0OwTHSGw5kg_owned")
+    assert asyncio.run(provider.library_add(item)) is True
+
+
+def test_library_add_treats_403_on_album_as_no_op(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 403: Forbidden.")
+    )
+    item = _make_item(MediaType.ALBUM, "MPREb_owned")
+    assert asyncio.run(provider.library_add(item)) is True
+
+
+def test_library_add_non_403_error_returns_false(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 500: Internal Server Error.")
+    )
+    item = _make_item(MediaType.PLAYLIST, "PLsome")
+    assert asyncio.run(provider.library_add(item)) is False
+
+
+def test_library_add_403_on_artist_is_not_swallowed(provider):
+    """The 403 no-op only applies to ALBUM/PLAYLIST — artist subscription failure is real."""
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 403: Forbidden.")
+    )
+    item = _make_item(MediaType.ARTIST, "UCsome")
+    assert asyncio.run(provider.library_add(item)) is False
+
+
+def test_library_remove_treats_403_on_playlist_as_no_op(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 403: Forbidden.")
+    )
+    assert (
+        asyncio.run(provider.library_remove("PL0OwTHSGw5kg_owned", MediaType.PLAYLIST))
+        is True
+    )
+
+
+def test_library_remove_treats_403_on_album_as_no_op(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 403: Forbidden.")
+    )
+    assert asyncio.run(provider.library_remove("MPREb_owned", MediaType.ALBUM)) is True
+
+
+def test_library_remove_non_403_error_returns_false(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 500: Internal Server Error.")
+    )
+    assert asyncio.run(provider.library_remove("PLsome", MediaType.PLAYLIST)) is False
+
+
+def test_library_remove_403_on_artist_is_not_swallowed(provider):
+    _make_authed_provider_with_rate_failure(
+        provider, RuntimeError("Server returned HTTP 403: Forbidden.")
+    )
+    assert asyncio.run(provider.library_remove("UCsome", MediaType.ARTIST)) is False
+
+
+# ---------------------------------------------------------------------------
+# Cookie sanity warning (issue #6 follow-up)
+# ---------------------------------------------------------------------------
+
+
+import logging as _logging
+
+
+class _CaptureHandler(_logging.Handler):
+    """Logging handler that stores records for later assertion."""
+
+    def __init__(self):
+        super().__init__(level=_logging.DEBUG)
+        self.records: list[_logging.LogRecord] = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+    def messages(self) -> list[str]:
+        return [r.getMessage() for r in self.records]
+
+
+def _attach_capture(provider):
+    handler = _CaptureHandler()
+    logger = _logging.getLogger(f"ytmusic_free_capture_{id(handler)}")
+    logger.handlers = [handler]
+    logger.setLevel(_logging.DEBUG)
+    logger.propagate = False
+    provider.logger = logger
+    return handler
+
+
+def _silent_open(monkeypatch):
+    captured = {"buffer": []}
+
+    class _DummyFile:
+        def __init__(self, *_):
+            pass
+
+        def write(self, data):
+            captured["buffer"].append(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: _DummyFile())
+    return captured
+
+
+def test_build_auth_file_warns_when_recommended_cookies_missing(provider, monkeypatch):
+    _silent_open(monkeypatch)
+    handler = _attach_capture(provider)
+
+    # Has the hard requirement but none of the recommended session cookies.
+    provider._build_auth_file("__Secure-3PAPISID=onlythis; SAPISID=foo")
+
+    messages = handler.messages()
+    assert any("missing recommended" in m for m in messages), messages
+    joined = " ".join(messages)
+    assert "__Secure-1PSID" in joined
+    assert "__Secure-3PSID" in joined
+
+
+def test_build_auth_file_no_warning_when_full_cookie_present(provider, monkeypatch):
+    _silent_open(monkeypatch)
+    handler = _attach_capture(provider)
+
+    cookie = (
+        "__Secure-3PAPISID=a; SAPISID=b; "
+        "__Secure-1PSID=c; __Secure-3PSID=d; HSID=e"
+    )
+    provider._build_auth_file(cookie)
+
+    assert not any("missing recommended" in m for m in handler.messages())
+
+
+def test_build_auth_file_substring_only_does_not_satisfy_recommendation(provider, monkeypatch):
+    """A bare mention like '__Secure-1PSID-other=v' must not count as having that cookie."""
+    _silent_open(monkeypatch)
+    handler = _attach_capture(provider)
+    # The cookie names parsed are the bit before '=' — make sure we match exactly.
+    cookie = "__Secure-3PAPISID=a; __Secure-1PSID-typo=oops; SAPISID=b"
+    provider._build_auth_file(cookie)
+    joined = " ".join(handler.messages())
+    assert "__Secure-1PSID" in joined  # listed as missing
+
+
+# ---------------------------------------------------------------------------
+# Auth-lapse detection in library calls
+# ---------------------------------------------------------------------------
+
+
+def test_is_auth_lapse_detects_401(provider):
+    assert provider._is_auth_lapse(RuntimeError("Server returned HTTP 401: Unauthorized")) is True
+
+
+def test_is_auth_lapse_detects_unauthorized_text(provider):
+    assert provider._is_auth_lapse(RuntimeError("Unauthorized access")) is True
+
+
+def test_is_auth_lapse_ignores_non_auth_errors(provider):
+    assert provider._is_auth_lapse(RuntimeError("Connection reset by peer")) is False
+    assert provider._is_auth_lapse(RuntimeError("HTTP 500")) is False
+    # 403 alone is intentionally not treated as auth lapse here — it has the
+    # separate owned-playlist no-op path. Auth lapses surface as 401.
+    assert provider._is_auth_lapse(RuntimeError("HTTP 403: Forbidden")) is False
+
+
+def test_library_error_warning_includes_refresh_hint_on_auth_lapse(provider):
+    handler = _attach_capture(provider)
+    provider._auth_lapse_warned = False
+    provider._warn_library_error(
+        "get_library_songs", RuntimeError("Server returned HTTP 401: Unauthorized")
+    )
+    joined = " ".join(handler.messages())
+    assert "refresh it" in joined.lower() or "cookie" in joined.lower()
+    assert provider._auth_lapse_warned is True
+
+
+def test_library_error_warning_does_not_spam_repeated_auth_errors(provider):
+    handler = _attach_capture(provider)
+    provider._auth_lapse_warned = False
+    err = RuntimeError("Server returned HTTP 401: Unauthorized")
+    provider._warn_library_error("get_library_songs", err)
+    provider._warn_library_error("get_library_playlists", err)
+    provider._warn_library_error("get_library_albums", err)
+    warnings = [r for r in handler.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, [r.getMessage() for r in handler.records]
+
+
+def test_library_error_warning_uses_generic_message_for_non_auth_errors(provider):
+    handler = _attach_capture(provider)
+    provider._auth_lapse_warned = False
+    provider._warn_library_error(
+        "get_library_albums", RuntimeError("Connection timeout")
+    )
+    warnings = [r for r in handler.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "Connection timeout" in msg
+    assert "cookie" not in msg.lower()
+    assert provider._auth_lapse_warned is False
+
+
+def test_get_library_playlists_propagates_auth_lapse_hint(provider):
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_playlists = MagicMock(
+        side_effect=RuntimeError("Server returned HTTP 401: Unauthorized")
+    )
+    provider._ytmusic = mock
+
+    async def _consume():
+        return [item async for item in provider.get_library_playlists()]
+
+    assert asyncio.run(_consume()) == []
+    joined = " ".join(handler.messages())
+    assert "cookie" in joined.lower()
+
+
+def test_get_library_albums_propagates_auth_lapse_hint(provider):
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_albums = MagicMock(
+        side_effect=RuntimeError("Server returned HTTP 401: Unauthorized")
+    )
+    provider._ytmusic = mock
+
+    async def _consume():
+        return [item async for item in provider.get_library_albums()]
+
+    assert asyncio.run(_consume()) == []
+    joined = " ".join(handler.messages())
+    assert "cookie" in joined.lower()
+
+
+def test_recommendations_propagates_auth_lapse_hint(provider):
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_home = MagicMock(
+        side_effect=RuntimeError("Server returned HTTP 401: Unauthorized")
+    )
+    provider._ytmusic = mock
+
+    result = asyncio.run(provider.recommendations())
+    assert result == []
+    joined = " ".join(handler.messages())
+    assert "cookie" in joined.lower()

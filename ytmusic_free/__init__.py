@@ -98,6 +98,17 @@ CONF_PREFER_AUDIO_QUALITY = "prefer_audio_quality"
 AUTH_TYPE_NONE = "none"
 AUTH_TYPE_COOKIE = "cookie"
 
+# Cookie names that __Secure-3PAPISID alone cannot replace. A cookie capture
+# that passes the hard check but is missing these often validates at init
+# (single trivial call) and then fails for broader library queries minutes
+# or hours later, with no obvious error to the user. See issue #6.
+RECOMMENDED_AUTH_COOKIES = ("__Secure-1PSID", "__Secure-3PSID", "SAPISID")
+
+# Substrings in exception messages that suggest an auth lapse (vs. a transient
+# network or parsing error). ytmusicapi surfaces httpx.HTTPStatusError with the
+# response status in the message, so plain substring matching is sufficient.
+AUTH_LAPSE_ERROR_MARKERS = ("401", "Unauthorized")
+
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
@@ -171,6 +182,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
     _yt_dlp_module = None
     _prefer_quality: bool = True
     _authenticated: bool = False
+    _auth_lapse_warned: bool = False
 
     async def handle_async_init(self) -> None:
         """Set up the YTMusicFree provider."""
@@ -191,6 +203,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     # Validate auth by making a lightweight library call
                     await asyncio.to_thread(self._ytmusic.get_library_songs, limit=1)
                     self._authenticated = True
+                    self._auth_lapse_warned = False
                     self.logger.info(
                         "YouTube Music (Free) initialized with cookie authentication — "
                         "library sync enabled"
@@ -225,6 +238,20 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
         if "__Secure-3PAPISID" not in cookie:
             raise ValueError("Cookie must contain __Secure-3PAPISID")
+        cookie_names = {
+            part.strip().split("=", 1)[0]
+            for part in cookie.split(";")
+            if "=" in part
+        }
+        missing = [c for c in RECOMMENDED_AUTH_COOKIES if c not in cookie_names]
+        if missing:
+            self.logger.warning(
+                "Cookie is missing recommended values: %s. The provider may "
+                "validate at init and then fail library calls a few minutes later. "
+                "Recapture the Cookie header from a `youtubei/v1/...` request on "
+                "music.youtube.com (see issue #6 for the full set to include).",
+                ", ".join(missing),
+            )
         # Extract SAPISID from cookie
         sapisid = None
         for part in cookie.split(";"):
@@ -613,6 +640,29 @@ class YoutubeMusicFreeProvider(MusicProvider):
     # Library methods (require authentication)
     # ------------------------------------------------------------------
 
+    def _is_auth_lapse(self, err: Exception) -> bool:
+        """Return True if the error looks like an expired or invalid cookie."""
+        err_str = str(err)
+        return any(marker in err_str for marker in AUTH_LAPSE_ERROR_MARKERS)
+
+    def _warn_library_error(self, context: str, err: Exception) -> None:
+        """Log a library-call failure, upgrading the message on suspected auth lapse."""
+        if self._is_auth_lapse(err):
+            if not self._auth_lapse_warned:
+                self._auth_lapse_warned = True
+                self.logger.warning(
+                    "%s failed with an auth error (%s). Your YouTube cookie has "
+                    "likely expired. Refresh it on the provider config page by "
+                    "capturing the Cookie header from a `youtubei/v1/...` request "
+                    "on music.youtube.com.",
+                    context,
+                    err,
+                )
+            else:
+                self.logger.debug("%s failed (auth lapse, already warned): %s", context, err)
+        else:
+            self.logger.warning("%s failed: %s", context, err)
+
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Get artists from the user's library (subscriptions + library artists)."""
 
@@ -633,7 +683,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                         seen_ids.add(artist.item_id)
                         yield artist
         except Exception as err:
-            self.logger.warning("get_library_subscriptions failed: %s", err)
+            self._warn_library_error("get_library_subscriptions", err)
         # Then library artists (from liked songs) — skip duplicates
         try:
             lib_artists = await asyncio.to_thread(
@@ -648,7 +698,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                         seen_ids.add(artist.item_id)
                         yield artist
         except Exception as err:
-            self.logger.warning("get_library_artists failed: %s", err)
+            self._warn_library_error("get_library_artists", err)
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Get albums from the user's library."""
@@ -661,7 +711,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             )
 
         except Exception as err:
-            self.logger.warning("get_library_albums failed: %s", err)
+            self._warn_library_error("get_library_albums", err)
             return
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
@@ -678,7 +728,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             )
 
         except Exception as err:
-            self.logger.warning("get_library_songs failed: %s", err)
+            self._warn_library_error("get_library_songs", err)
             return
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
@@ -697,7 +747,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             )
 
         except Exception as err:
-            self.logger.warning("get_library_playlists failed: %s", err)
+            self._warn_library_error("get_library_playlists", err)
             return
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
@@ -733,7 +783,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     item_id,
                 )
                 return True
-            self.logger.warning("library_add failed for %s: %s", item_id, err)
+            self._warn_library_error(f"library_add for {item_id}", err)
             return False
 
     async def library_remove(self, prov_item_id: str, media_type: MediaType) -> bool:
@@ -759,7 +809,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     prov_item_id,
                 )
                 return True
-            self.logger.warning("library_remove failed for %s: %s", prov_item_id, err)
+            self._warn_library_error(f"library_remove for {prov_item_id}", err)
             return False
 
     async def recommendations(self) -> list[RecommendationFolder]:
@@ -769,7 +819,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         try:
             home = await asyncio.to_thread(self._ytmusic.get_home, limit=6)
         except Exception as err:
-            self.logger.warning("get_home failed: %s", err)
+            self._warn_library_error("get_home", err)
             return []
         folders: list[RecommendationFolder] = []
         for section in home:
