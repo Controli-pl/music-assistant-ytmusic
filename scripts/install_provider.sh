@@ -38,6 +38,28 @@ log()  { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
+# 'docker' missing is the single most common install failure on HAOS, because
+# the official Terminal & SSH add-on is sandboxed and cannot reach the host
+# Docker daemon. Give an actionable message instead of a bare "not found".
+need_docker() {
+    command -v docker >/dev/null 2>&1 && return 0
+    die "the 'docker' command was not found.
+
+This installer must run from a shell that can reach the host Docker daemon,
+because it copies the provider into the Music Assistant container. The official
+'Terminal & SSH' add-on is sandboxed and does not provide Docker, which is the
+usual cause of this error on Home Assistant OS (for example HA Green or Yellow).
+
+Two ways to proceed:
+  A) Install the 'Advanced SSH & Web Terminal' community add-on, set its
+     'Protection mode' to OFF, restart it, then re-run this one-liner there.
+  B) Skip Docker in your shell: run install_watcher_addon.sh instead, then
+     install and start the 'MA Provider Watcher' local add-on (Protection mode
+     OFF). It injects the provider for you and also survives HA restarts.
+
+See the README 'Installation' section for the full walkthrough."
+}
+
 usage() {
     cat <<EOF
 Usage: sh install_provider.sh [options]
@@ -78,7 +100,7 @@ need tar
 need mkdir
 need cp
 need rm
-need docker
+need_docker
 
 # --- Detect MA container -----------------------------------------------------
 

@@ -23,13 +23,15 @@ Music Assistant runs as a Docker container (HA add-on). The provider files must 
 
 ### Quick install (recommended)
 
-One-line install from a host shell (HAOS Terminal add-on or Supervised SSH):
+One-line install from a shell with **host Docker access**. On Home Assistant OS that means the **Advanced SSH & Web Terminal** community add-on with **Protection mode off** (the official Terminal & SSH add-on is sandboxed and cannot reach Docker, so the script aborts with `required command not found: docker`). On a Supervised install, a normal root SSH session works:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_provider.sh | sh
 ```
 
 The script auto-detects your MA container ID, Python version, and `/config` path, downloads the latest provider, stages it under `/config/custom_components/mass/providers/`, copies it into the MA container, and restarts MA. Re-run anytime to upgrade.
+
+> **No Docker in your shell?** On Home Assistant OS the watcher add-on route does not need Docker in your terminal: run `install_watcher_addon.sh` (see below), then install and start the **MA Provider Watcher** local add-on with Protection mode off. It injects the provider for you and keeps it installed across restarts.
 
 Then jump to step 4 below to add the provider in the MA UI, and see [WATCHER_ADDON.md](WATCHER_ADDON.md) (or the quick installer further down) to make the install survive HA restarts.
 

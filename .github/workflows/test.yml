@@ -16,12 +16,18 @@ jobs:
           shellcheck --version
           shellcheck -s sh scripts/install_watcher_addon.sh
           shellcheck -s sh tests/test_install_watcher_addon.sh
+          shellcheck -s sh scripts/install_provider.sh
+          shellcheck -s sh tests/test_install_provider.sh
 
       - name: Run installer test suite (POSIX sh, dash)
-        run: dash tests/test_install_watcher_addon.sh
+        run: |
+          dash tests/test_install_watcher_addon.sh
+          dash tests/test_install_provider.sh
 
       - name: Run installer test suite (bash, for parity)
-        run: bash tests/test_install_watcher_addon.sh
+        run: |
+          bash tests/test_install_watcher_addon.sh
+          bash tests/test_install_provider.sh
 
   busybox:
     # Runs the suite inside Alpine, which uses BusyBox ash + BusyBox utilities
@@ -41,7 +47,8 @@ jobs:
             sh -c 'apk add --no-cache curl ca-certificates >/dev/null \
                    && echo "shell: $(readlink -f /bin/sh)" \
                    && busybox --help 2>&1 | head -1 \
-                   && sh tests/test_install_watcher_addon.sh'
+                   && sh tests/test_install_watcher_addon.sh \
+                   && sh tests/test_install_provider.sh'
 
   python:
     runs-on: ubuntu-latest
