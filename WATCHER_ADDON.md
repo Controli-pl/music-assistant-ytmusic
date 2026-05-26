@@ -151,6 +151,14 @@ Common flags:
 
 Run `sh install_watcher_addon.sh --help` to see all options.
 
+> **Passing flags through `curl | sh`:** if you re-run the one-liner with a flag, use `sh -s --` as a separator so the flag goes to the script and not to `sh` itself:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh -s -- --force
+> ```
+>
+> `curl ... | sh --force` parses `--force` as a shell option and fails with `sh: bad option '--force'`.
+
 > **Auto-detection caveats:** the MA container ID and Python version are detected via `docker ps` / `docker exec`, which requires running the script from a host shell with Docker access (e.g. the SSH & Web Terminal add-on with Protection Mode off, or the host shell on a Supervised install). If detection fails, the script falls back to `addon_d5369777_music_assistant` and `python3.13` and prints a warning — verify and re-run with `--ma-id` / `--python-version` if those defaults are wrong for your install.
 
 ---

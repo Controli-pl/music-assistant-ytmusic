@@ -156,6 +156,10 @@ if [ "$network_ok" = "1" ]; then
     assert_contains "run.sh has substituted MA ID" 'MA="addon_TESTID_music_assistant"' "$runsh"
     assert_contains "run.sh has substituted Python version" "/python3.99/" "$runsh"
     assert_contains "run.sh shebang is bash" "#!/usr/bin/env bash" "$runsh"
+    assert_contains "run.sh logs the watched container name on start" "Watching for container name" "$runsh"
+    assert_contains "run.sh has misconfig diagnostic function" "warn_if_ma_misconfigured" "$runsh"
+    assert_contains "run.sh references MISSING_GRACE_SECONDS" "MISSING_GRACE_SECONDS" "$runsh"
+    assert_contains "run.sh diagnostic mentions --ma-id remedy" "--ma-id" "$runsh"
 
     if bash -n "$ADDON/run.sh" 2>/dev/null; then
         pass "generated run.sh passes bash -n"

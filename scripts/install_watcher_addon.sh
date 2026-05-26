@@ -203,8 +203,13 @@ cat > "$ADDON_DIR/run.sh" <<EOF
 MA="$MA_ID"
 SRC="/provider/ytmusic_free"
 DST="/app/venv/lib/$PYTHON_VERSION/site-packages/music_assistant/providers"
+# How long to wait for the configured MA container to appear before logging a
+# loud ERROR. Catches the case where the installer's auto-detect fallback
+# baked in a container name that does not exist on this host (issue #11).
+MISSING_GRACE_SECONDS=60
 
 echo "[\$(date)] MA Provider Watcher starting..."
+echo "[\$(date)] Watching for container name: \$MA"
 
 if ! docker info > /dev/null 2>&1; then
     echo "[\$(date)] ERROR: No Docker socket (is Protection Mode off?)"
@@ -220,6 +225,21 @@ install_provider() {
     docker restart "\$MA" && echo "[\$(date)] MA restarted" || echo "[\$(date)] ERROR: restart failed"
 }
 
+warn_if_ma_misconfigured() {
+    # If the configured container name doesn't match anything, give the
+    # user enough information to fix it. Always check at least one known
+    # candidate so the diagnostic surfaces even when nothing matches \$MA.
+    found="\$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'music' || true)"
+    echo "[\$(date)] ERROR: no container matched name '\$MA' after \${MISSING_GRACE_SECONDS}s."
+    if [ -n "\$found" ]; then
+        echo "[\$(date)] HINT: containers with 'music' in the name on this host:"
+        printf '%s\n' "\$found" | sed "s/^/[\$(date)]   /"
+        echo "[\$(date)] HINT: re-run install_watcher_addon.sh with --ma-id <name> --force using one of those, then restart this add-on."
+    else
+        echo "[\$(date)] HINT: docker ps shows no container with 'music' in the name. Is the Music Assistant add-on installed and running?"
+    fi
+}
+
 LAST_ID=\$(docker ps -q --no-trunc --filter name="\$MA" 2>/dev/null)
 if [ -n "\$LAST_ID" ]; then
     echo "[\$(date)] MA running (\${LAST_ID:0:12}), installing provider..."
@@ -229,6 +249,9 @@ else
 fi
 
 echo "[\$(date)] Polling for MA container changes every 10s..."
+MISSING_SINCE=0
+MISSING_WARNED=0
+[ -z "\$LAST_ID" ] && MISSING_SINCE=\$(date +%s)
 while true; do
     sleep 10
     CUR_ID=\$(docker ps -q --no-trunc --filter name="\$MA" 2>/dev/null)
@@ -236,9 +259,17 @@ while true; do
         echo "[\$(date)] New MA container (\${CUR_ID:0:12}), reinstalling..."
         LAST_ID="\$CUR_ID"
         install_provider
+        MISSING_SINCE=0
+        MISSING_WARNED=0
     elif [ -z "\$CUR_ID" ] && [ -n "\$LAST_ID" ]; then
         echo "[\$(date)] MA stopped"
         LAST_ID=""
+        MISSING_SINCE=\$(date +%s)
+    elif [ -z "\$CUR_ID" ] && [ "\$MISSING_WARNED" -eq 0 ] && [ "\$MISSING_SINCE" -gt 0 ]; then
+        if [ \$((\$(date +%s) - MISSING_SINCE)) -ge "\$MISSING_GRACE_SECONDS" ]; then
+            warn_if_ma_misconfigured
+            MISSING_WARNED=1
+        fi
     fi
 done
 EOF
