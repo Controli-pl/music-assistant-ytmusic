@@ -976,3 +976,229 @@ def test_recommendations_propagates_auth_lapse_hint(provider):
     assert result == []
     joined = " ".join(handler.messages())
     assert "cookie" in joined.lower()
+
+
+# ---------------------------------------------------------------------------
+# Partial-auth empty-library detection (issue #10)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_session_alive_true_when_account_info_has_name(provider):
+    mock = MagicMock()
+    mock.get_account_info = MagicMock(return_value={"accountName": "Someone"})
+    provider._ytmusic = mock
+    assert provider._probe_session_alive() is True
+
+
+def test_probe_session_alive_false_when_account_info_missing_name(provider):
+    mock = MagicMock()
+    mock.get_account_info = MagicMock(return_value={})
+    provider._ytmusic = mock
+    assert provider._probe_session_alive() is False
+
+
+def test_probe_session_alive_false_on_auth_lapse_error(provider):
+    mock = MagicMock()
+    mock.get_account_info = MagicMock(
+        side_effect=RuntimeError("Server returned HTTP 401: Unauthorized")
+    )
+    provider._ytmusic = mock
+    assert provider._probe_session_alive() is False
+
+
+def test_probe_session_alive_none_on_transient_error(provider):
+    """A non-auth error must NOT be treated as a definite lapse signal."""
+    mock = MagicMock()
+    mock.get_account_info = MagicMock(side_effect=RuntimeError("Connection reset"))
+    provider._ytmusic = mock
+    assert provider._probe_session_alive() is None
+
+
+def test_probe_session_alive_none_when_method_unavailable(provider):
+    """Older ytmusicapi without get_account_info — undetermined, never False."""
+    provider._ytmusic = object()  # bare object, no methods
+    assert provider._probe_session_alive() is None
+
+
+def test_probe_session_alive_none_when_ytmusic_unset(provider):
+    provider._ytmusic = None
+    assert provider._probe_session_alive() is None
+
+
+def _consume(generator):
+    async def _drain():
+        return [item async for item in generator]
+
+    return asyncio.run(_drain())
+
+
+def _track_dict(video_id: str, title: str = "x") -> dict:
+    return {
+        "videoId": video_id,
+        "title": title,
+        "artists": [{"id": "UC1", "name": "A"}],
+    }
+
+
+def test_first_empty_library_sync_does_not_warn_or_raise(provider):
+    """A brand-new account with no liked songs should sync to empty silently."""
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_songs = MagicMock(return_value=[])
+    mock.get_account_info = MagicMock(
+        return_value={"accountName": "Should Not Be Called"}
+    )
+    provider._ytmusic = mock
+
+    result = _consume(provider.get_library_tracks())
+
+    assert result == []
+    # Probe must not be invoked on first-ever empty result.
+    assert mock.get_account_info.call_count == 0
+    warnings = [r for r in handler.records if r.levelname == "WARNING"]
+    assert warnings == []
+
+
+def test_repeated_empty_library_sync_does_not_warn_or_probe(provider):
+    """Empty → empty (never populated) must stay silent and never probe."""
+    provider._authenticated = True
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_songs = MagicMock(return_value=[])
+    mock.get_account_info = MagicMock(return_value={"accountName": "x"})
+    provider._ytmusic = mock
+
+    _consume(provider.get_library_tracks())
+    _consume(provider.get_library_tracks())
+
+    assert mock.get_account_info.call_count == 0
+    assert [r for r in handler.records if r.levelname == "WARNING"] == []
+
+
+def test_populated_then_empty_triggers_probe_and_raises_on_lapse(provider):
+    """Once we've seen items, a later empty sync must probe and raise on lapse."""
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    # First call returns items, second returns empty (the lapse).
+    mock.get_library_songs = MagicMock(side_effect=[[_track_dict("v1")], []])
+    mock.get_account_info = MagicMock(return_value={})  # logged-out shape
+    provider._ytmusic = mock
+
+    first = _consume(provider.get_library_tracks())
+    assert len(first) == 1
+
+    with pytest.raises(RuntimeError, match="partial-auth"):
+        _consume(provider.get_library_tracks())
+
+    assert mock.get_account_info.call_count == 1
+    joined = " ".join(handler.messages()).lower()
+    assert "cookie" in joined  # warning text should hint at cookie refresh
+
+
+def test_populated_then_empty_does_not_raise_when_probe_alive(provider):
+    """Probe confirms session — treat empty as a real empty library, no raise."""
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_songs = MagicMock(side_effect=[[_track_dict("v1")], []])
+    mock.get_account_info = MagicMock(return_value={"accountName": "Someone"})
+    provider._ytmusic = mock
+
+    _consume(provider.get_library_tracks())
+    # Probe says alive — generator returns empty without raising.
+    result = _consume(provider.get_library_tracks())
+    assert result == []
+    assert mock.get_account_info.call_count == 1
+    assert [r for r in handler.records if r.levelname == "WARNING"] == []
+
+
+def test_populated_then_empty_does_not_raise_on_undetermined_probe(provider):
+    """Transient probe error must not raise — that would invent a false alarm."""
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_songs = MagicMock(side_effect=[[_track_dict("v1")], []])
+    mock.get_account_info = MagicMock(side_effect=RuntimeError("Connection timeout"))
+    provider._ytmusic = mock
+
+    _consume(provider.get_library_tracks())
+    result = _consume(provider.get_library_tracks())
+    assert result == []
+    assert [r for r in handler.records if r.levelname == "WARNING"] == []
+
+
+def test_partial_auth_guard_covers_get_library_albums(provider):
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_albums = MagicMock(
+        side_effect=[[{"browseId": "MPREb_x", "title": "A"}], []]
+    )
+    mock.get_account_info = MagicMock(return_value={})
+    provider._ytmusic = mock
+
+    _consume(provider.get_library_albums())
+    with pytest.raises(RuntimeError, match="partial-auth"):
+        _consume(provider.get_library_albums())
+    joined = " ".join(handler.messages()).lower()
+    assert "cookie" in joined
+
+
+def test_partial_auth_guard_covers_get_library_playlists(provider):
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    mock = MagicMock()
+    mock.get_library_playlists = MagicMock(
+        side_effect=[[{"id": "PL1", "title": "P"}], []]
+    )
+    mock.get_account_info = MagicMock(return_value={})
+    provider._ytmusic = mock
+
+    _consume(provider.get_library_playlists())
+    with pytest.raises(RuntimeError, match="partial-auth"):
+        _consume(provider.get_library_playlists())
+
+
+def test_partial_auth_guard_covers_get_library_artists(provider):
+    """Artists generator combines subscriptions + library artists; guard sees total."""
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    mock = MagicMock()
+    mock.get_library_subscriptions = MagicMock(
+        side_effect=[[{"channelId": "UC1", "name": "A"}], []]
+    )
+    mock.get_library_artists = MagicMock(side_effect=[[], []])
+    mock.get_account_info = MagicMock(return_value={})
+    provider._ytmusic = mock
+
+    first = _consume(provider.get_library_artists())
+    assert len(first) == 1
+    with pytest.raises(RuntimeError, match="partial-auth"):
+        _consume(provider.get_library_artists())
+
+
+def test_partial_auth_guard_per_category_state_isolated(provider):
+    """Having seen tracks must not arm the guard for playlists."""
+    provider._authenticated = True
+    provider._auth_lapse_warned = False
+    handler = _attach_capture(provider)
+    mock = MagicMock()
+    mock.get_library_songs = MagicMock(return_value=[_track_dict("v1")])
+    mock.get_library_playlists = MagicMock(return_value=[])
+    mock.get_account_info = MagicMock(return_value={})  # would say lapsed if called
+    provider._ytmusic = mock
+
+    # Populate tracks state.
+    _consume(provider.get_library_tracks())
+    # Playlists has never been populated — empty result must not probe.
+    result = _consume(provider.get_library_playlists())
+    assert result == []
+    assert mock.get_account_info.call_count == 0
+    assert [r for r in handler.records if r.levelname == "WARNING"] == []

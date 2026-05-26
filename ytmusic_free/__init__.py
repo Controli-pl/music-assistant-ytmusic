@@ -183,6 +183,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
     _prefer_quality: bool = True
     _authenticated: bool = False
     _auth_lapse_warned: bool = False
+    # Per-category flag: True once we've seen a non-empty sync. Used to tell a
+    # genuinely empty library apart from a partial-auth HTTP 200 response that
+    # ytmusicapi unwraps to []. See issue #10.
+    _library_seen_nonempty: dict[str, bool]
 
     async def handle_async_init(self) -> None:
         """Set up the YTMusicFree provider."""
@@ -645,6 +649,57 @@ class YoutubeMusicFreeProvider(MusicProvider):
         err_str = str(err)
         return any(marker in err_str for marker in AUTH_LAPSE_ERROR_MARKERS)
 
+    def _probe_session_alive(self) -> bool | None:
+        """Best-effort check that the ytmusicapi session is still authenticated.
+
+        Returns True if the probe succeeded with account data, False if it
+        responded in a logged-out shape or raised an auth-lapse error, and
+        None if the probe is undetermined (method missing, transient error).
+        See issue #10 — used to detect partial-auth HTTP 200 responses that
+        ytmusicapi unwraps to [] for library calls.
+        """
+        if not self._ytmusic:
+            return None
+        probe = getattr(self._ytmusic, "get_account_info", None)
+        if probe is None:
+            return None
+        try:
+            info = probe()
+        except Exception as err:
+            return False if self._is_auth_lapse(err) else None
+        if isinstance(info, dict) and not info.get("accountName"):
+            return False
+        return True
+
+    def _record_library_count(self, category: str, count: int) -> bool:
+        """Track per-category populated state; return True if previously populated."""
+        if not hasattr(self, "_library_seen_nonempty"):
+            self._library_seen_nonempty = {}
+        prev = self._library_seen_nonempty.get(category, False)
+        if count > 0:
+            self._library_seen_nonempty[category] = True
+        return prev
+
+    async def _guard_partial_auth_empty(self, category: str, count: int) -> None:
+        """Raise on a suspected partial-auth empty sync to preserve MA's library cache.
+
+        Only fires when the category was previously populated and the current
+        sync came back empty, then a side-channel probe confirms the session
+        is no longer authenticated.
+        """
+        previously_populated = self._record_library_count(category, count)
+        if count > 0 or not previously_populated:
+            return
+        alive = await asyncio.to_thread(self._probe_session_alive)
+        if alive is not False:
+            return
+        err = RuntimeError(
+            "Library returned empty but session probe reports Unauthorized "
+            "(suspected partial-auth lapse, issue #10)"
+        )
+        self._warn_library_error(f"get_library_{category}", err)
+        raise err
+
     def _warn_library_error(self, context: str, err: Exception) -> None:
         """Log a library-call failure, upgrading the message on suspected auth lapse."""
         if self._is_auth_lapse(err):
@@ -668,37 +723,38 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
         if not self._authenticated:
             return
-        seen_ids: set[str] = set()
-        # Subscriptions first (explicitly followed artists)
+        subs: list[dict] = []
+        lib_artists: list[dict] = []
         try:
             subs = await asyncio.to_thread(
                 self._ytmusic.get_library_subscriptions, limit=9999
-            )
-            for item in subs:
-                with suppress(InvalidDataError, KeyError, TypeError):
-                    item.setdefault("channelId", item.get("browseId"))
-                    item.setdefault("name", item.get("artist"))
-                    artist = self._parse_artist(item)
-                    if artist.item_id not in seen_ids:
-                        seen_ids.add(artist.item_id)
-                        yield artist
+            ) or []
         except Exception as err:
             self._warn_library_error("get_library_subscriptions", err)
-        # Then library artists (from liked songs) — skip duplicates
         try:
             lib_artists = await asyncio.to_thread(
                 self._ytmusic.get_library_artists, limit=9999
-            )
-            for item in lib_artists:
-                with suppress(InvalidDataError, KeyError, TypeError):
-                    item.setdefault("channelId", item.get("browseId"))
-                    item.setdefault("name", item.get("artist"))
-                    artist = self._parse_artist(item)
-                    if artist.item_id not in seen_ids:
-                        seen_ids.add(artist.item_id)
-                        yield artist
+            ) or []
         except Exception as err:
             self._warn_library_error("get_library_artists", err)
+        await self._guard_partial_auth_empty("artists", len(subs) + len(lib_artists))
+        seen_ids: set[str] = set()
+        for item in subs:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                item.setdefault("channelId", item.get("browseId"))
+                item.setdefault("name", item.get("artist"))
+                artist = self._parse_artist(item)
+                if artist.item_id not in seen_ids:
+                    seen_ids.add(artist.item_id)
+                    yield artist
+        for item in lib_artists:
+            with suppress(InvalidDataError, KeyError, TypeError):
+                item.setdefault("channelId", item.get("browseId"))
+                item.setdefault("name", item.get("artist"))
+                artist = self._parse_artist(item)
+                if artist.item_id not in seen_ids:
+                    seen_ids.add(artist.item_id)
+                    yield artist
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Get albums from the user's library."""
@@ -708,11 +764,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
         try:
             results = await asyncio.to_thread(
                 self._ytmusic.get_library_albums, limit=9999
-            )
-
+            ) or []
         except Exception as err:
             self._warn_library_error("get_library_albums", err)
             return
+        await self._guard_partial_auth_empty("albums", len(results))
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
                 yield self._parse_album(item, item.get("browseId"))
@@ -725,11 +781,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
         try:
             results = await asyncio.to_thread(
                 self._ytmusic.get_library_songs, limit=9999
-            )
-
+            ) or []
         except Exception as err:
             self._warn_library_error("get_library_songs", err)
             return
+        await self._guard_partial_auth_empty("tracks", len(results))
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
                 track = self._parse_track(item)
@@ -744,11 +800,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
         try:
             results = await asyncio.to_thread(
                 self._ytmusic.get_library_playlists, limit=9999
-            )
-
+            ) or []
         except Exception as err:
             self._warn_library_error("get_library_playlists", err)
             return
+        await self._guard_partial_auth_empty("playlists", len(results))
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
                 item.setdefault("id", item.get("playlistId"))
