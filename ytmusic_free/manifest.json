@@ -3,14 +3,14 @@
   "domain": "ytmusic_free",
   "stage": "experimental",
   "name": "YouTube Music (Free) + Track Likes",
-  "description": "Stream YouTube Music without Premium. Fork with working library add/remove for individual tracks (LIKE/INDIFFERENT). Uses yt-dlp + optional browser cookie auth.",
+  "description": "YouTube Music without Premium subscription. This fork adds support for liking individual tracks (library_add/remove for MediaType.TRACK).",
   "codeowners": ["sproft", "Controli-pl"],
-  "documentation": "https://github.com/Controli-pl/music-assistant-ytmusic/blob/main/README.md",
+  "documentation": "https://github.com/Controli-pl/music-assistant-ytmusic",
   "requirements": [
     "ytmusicapi>=1.7.0",
     "yt-dlp[default]>=2024.1.0",
     "duration-parser>=1.0.1"
   ],
-  "version": "1.1.0",
+  "version": "1.1.0-tracklikes",
   "multi_instance": false
 }
