@@ -810,61 +810,80 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 item.setdefault("id", item.get("playlistId"))
                 yield self._parse_playlist(item)
 
-    async def library_add(self, item: MediaItemType) -> bool:
+async def library_add(self, item: MediaItemType) -> bool:
         """Add an item to the user's library."""
         if not self._authenticated:
+            self.logger.warning("Not authenticated - cannot add to library")
             return False
+
         prov_mapping = next(
             (m for m in item.provider_mappings if m.provider_instance == self.instance_id),
             None,
         )
         if not prov_mapping:
             return False
+
         item_id = prov_mapping.item_id
+
         try:
             if item.media_type == MediaType.ARTIST:
                 await asyncio.to_thread(self._ytmusic.subscribe_artists, [item_id])
+                self.logger.info(f"✅ Subscribed to artist: {item_id}")
+
             elif item.media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
                 await asyncio.to_thread(self._ytmusic.rate_playlist, item_id, "LIKE")
+                self.logger.info(f"✅ Added {item.media_type} to library: {item_id}")
+
+            elif item.media_type == MediaType.TRACK:                    # <--- DODANE
+                await asyncio.to_thread(self._ytmusic.rate_song, item_id, "LIKE")
+                self.logger.info(f"✅ Added track to YTM library (LIKE): {item_id}")
+
             else:
+                self.logger.warning(f"library_add not supported for {item.media_type}")
                 return False
+
             return True
+
         except Exception as err:
-            # HTTP 403 typically means the item is already in the user's library
-            # (e.g. a playlist they own — YouTube refuses to "like" your own playlist).
-            # Treat this as a benign no-op so MA's library cache stays consistent.
-            if "403" in str(err) and item.media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
-                self.logger.debug(
-                    "library_add for %s returned 403 (likely user-owned, already in library)",
-                    item_id,
-                )
+            err_str = str(err)
+            if "403" in err_str:
+                self.logger.debug(f"library_add returned 403 for {item_id} (already in library)")
                 return True
+
             self._warn_library_error(f"library_add for {item_id}", err)
             return False
 
-    async def library_remove(self, prov_item_id: str, media_type: MediaType) -> bool:
+async def library_remove(self, prov_item_id: str, media_type: MediaType) -> bool:
         """Remove an item from the user's library."""
         if not self._authenticated:
             return False
+
         try:
             if media_type == MediaType.ARTIST:
                 await asyncio.to_thread(self._ytmusic.unsubscribe_artists, [prov_item_id])
+
             elif media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
                 await asyncio.to_thread(
                     self._ytmusic.rate_playlist, prov_item_id, "INDIFFERENT"
                 )
+
+            elif media_type == MediaType.TRACK:                     # <--- DODANE
+                await asyncio.to_thread(self._ytmusic.rate_song, prov_item_id, "INDIFFERENT")
+                self.logger.info(f"✅ Removed track from YTM library: {prov_item_id}")
+
             else:
+                self.logger.warning(f"library_remove not supported for {media_type}")
                 return False
+
             return True
+
         except Exception as err:
-            # HTTP 403 typically means the item is user-owned and cannot be
-            # un-rated — for MA's purposes the "not in library" state is satisfied.
-            if "403" in str(err) and media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
+            if "403" in str(err):
                 self.logger.debug(
-                    "library_remove for %s returned 403 (likely user-owned)",
-                    prov_item_id,
+                    f"library_remove returned 403 for {prov_item_id} (likely already removed)"
                 )
                 return True
+
             self._warn_library_error(f"library_remove for {prov_item_id}", err)
             return False
 
