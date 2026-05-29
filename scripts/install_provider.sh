@@ -22,7 +22,7 @@
 
 set -eu
 
-REPO_OWNER="sproft"
+REPO_OWNER="Controli-pl"
 REPO_NAME="music-assistant-ytmusic"
 PROVIDER_DIR="ytmusic_free"
 
