@@ -2,14 +2,15 @@
   "type": "music",
   "domain": "ytmusic_free",
   "stage": "experimental",
-  "name": "YouTube Music (Free)",
-  "description": "Stream YouTube Music without a premium subscription. Uses yt-dlp for audio extraction. Optional browser cookie auth unlocks library sync and recommendations.",
-  "codeowners": ["sproft"],
-  "documentation": "https://github.com/sproft/music-assistant-ytmusic/blob/main/README.md",
+  "name": "YouTube Music (Free) + Track Likes",
+  "description": "Stream YouTube Music without Premium. Fork with working library add/remove for individual tracks (LIKE/INDIFFERENT). Uses yt-dlp + optional browser cookie auth.",
+  "codeowners": ["sproft", "Controli-pl"],
+  "documentation": "https://github.com/Controli-pl/music-assistant-ytmusic/blob/main/README.md",
   "requirements": [
     "ytmusicapi>=1.7.0",
     "yt-dlp[default]>=2024.1.0",
     "duration-parser>=1.0.1"
   ],
+  "version": "1.1.0",
   "multi_instance": false
 }
