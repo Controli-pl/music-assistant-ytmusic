@@ -1,19 +1,18 @@
-
 """YouTube Music (Free) provider for Music Assistant.
- 
+
 Streams YouTube Music without a premium subscription by:
 - Using ytmusicapi for search/metadata (optionally with browser cookie auth)
 - Using yt-dlp with the iOS client to extract stream URLs (no PO token needed)
- 
+
 Authentication is optional. Without it, search/browse/playback work fine.
 With browser cookie authentication, library sync and recommendations unlock.
- 
+
 Note: This uses YouTube's internal APIs in an unofficial manner, similar to how
 apps like SimpMusic work. This may break if YouTube changes their API.
 """
- 
+
 from __future__ import annotations
- 
+
 import asyncio
 import importlib
 import logging
@@ -22,7 +21,7 @@ from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlparse
- 
+
 from duration_parser import parse as parse_str_duration
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption, ConfigValueType
 from music_assistant_models.enums import (
@@ -55,22 +54,22 @@ from music_assistant_models.media_items import (
     UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails
- 
+
 from music_assistant.helpers.util import infer_album_type, install_package, parse_title_and_version
 from music_assistant.models.music_provider import MusicProvider
- 
+
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
- 
+
     from music_assistant import MusicAssistant
     from music_assistant.models import ProviderInstanceType
- 
- 
+
+
 YTM_DOMAIN = "https://music.youtube.com"
 VARIOUS_ARTISTS_YTM_ID = "UCUTXlgdcKU5vfzFqHOWIvkA"
 DEFAULT_STREAM_URL_EXPIRATION = 3600  # 1 hour
- 
+
 # Features that work without a YTM account
 BASE_FEATURES = {
     ProviderFeature.SEARCH,
@@ -79,7 +78,7 @@ BASE_FEATURES = {
     ProviderFeature.SIMILAR_TRACKS,
     ProviderFeature.BROWSE,
 }
- 
+
 # Additional features unlocked by browser cookie authentication
 AUTHENTICATED_FEATURES = {
     ProviderFeature.LIBRARY_ARTISTS,
@@ -89,36 +88,37 @@ AUTHENTICATED_FEATURES = {
     ProviderFeature.RECOMMENDATIONS,
     ProviderFeature.LIBRARY_ARTISTS_EDIT,
     ProviderFeature.LIBRARY_ALBUMS_EDIT,
+    ProviderFeature.LIBRARY_TRACKS_EDIT,
     ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
 }
- 
+
 CONF_AUTH_TYPE = "auth_type"
 CONF_COOKIE = "cookie_header"
 CONF_BRAND_ACCOUNT = "brand_account"
 CONF_PREFER_AUDIO_QUALITY = "prefer_audio_quality"
 AUTH_TYPE_NONE = "none"
 AUTH_TYPE_COOKIE = "cookie"
- 
+
 # Cookie names that __Secure-3PAPISID alone cannot replace. A cookie capture
 # that passes the hard check but is missing these often validates at init
 # (single trivial call) and then fails for broader library queries minutes
 # or hours later, with no obvious error to the user. See issue #6.
 RECOMMENDED_AUTH_COOKIES = ("__Secure-1PSID", "__Secure-3PSID", "SAPISID")
- 
+
 # Substrings in exception messages that suggest an auth lapse (vs. a transient
 # network or parsing error). ytmusicapi surfaces httpx.HTTPStatusError with the
 # response status in the message, so plain substring matching is sufficient.
 AUTH_LAPSE_ERROR_MARKERS = ("401", "Unauthorized")
- 
- 
+
+
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
     # Declare all features upfront — library methods return empty when not authenticated
     return YoutubeMusicFreeProvider(mass, manifest, config, BASE_FEATURES | AUTHENTICATED_FEATURES)
- 
- 
+
+
 async def get_config_entries(
     mass: MusicAssistant,  # noqa: ARG001
     instance_id: str | None = None,  # noqa: ARG001
@@ -174,11 +174,11 @@ async def get_config_entries(
             "Disable to use a more compatible but potentially lower-quality format.",
         ),
     )
- 
- 
+
+
 class YoutubeMusicFreeProvider(MusicProvider):
     """Provider for YouTube Music without premium subscription."""
- 
+
     _ytmusic = None
     _yt_dlp_module = None
     _prefer_quality: bool = True
@@ -188,13 +188,13 @@ class YoutubeMusicFreeProvider(MusicProvider):
     # genuinely empty library apart from a partial-auth HTTP 200 response that
     # ytmusicapi unwraps to []. See issue #10.
     _library_seen_nonempty: dict[str, bool]
- 
+
     async def handle_async_init(self) -> None:
         """Set up the YTMusicFree provider."""
         logging.getLogger("yt_dlp").setLevel(logging.WARNING)
         await self._install_packages()
         self._prefer_quality = self.config.get_value(CONF_PREFER_AUDIO_QUALITY) or True
- 
+
         auth_type = self.config.get_value(CONF_AUTH_TYPE) or AUTH_TYPE_NONE
         if auth_type == AUTH_TYPE_COOKIE:
             cookie = self.config.get_value(CONF_COOKIE) or ""
@@ -225,22 +225,22 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 self._ytmusic = await asyncio.to_thread(self._create_ytmusic_client)
         else:
             self._ytmusic = await asyncio.to_thread(self._create_ytmusic_client)
- 
+
         if not self._authenticated:
             self.logger.info("YouTube Music (Free) initialized — anonymous mode")
- 
+
     def _create_ytmusic_client(self, auth: str | None = None, user: str | None = None):
         """Create a YTMusic client, optionally with authentication."""
         ytmusicapi = importlib.import_module("ytmusicapi")
         if auth:
             return ytmusicapi.YTMusic(auth=auth, user=user)
         return ytmusicapi.YTMusic()
- 
+
     def _build_auth_file(self, cookie: str) -> str:
         """Create a browser auth file and return the path."""
         import hashlib
         import json
- 
+
         if "__Secure-3PAPISID" not in cookie:
             raise ValueError("Cookie must contain __Secure-3PAPISID")
         cookie_names = {
@@ -293,7 +293,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         with open(auth_path, "w") as f:
             json.dump(headers, f)
         return auth_path
- 
+
     async def search(
         self,
         search_query: str,
@@ -302,7 +302,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
     ) -> SearchResults:
         """Perform search on YouTube Music."""
         parsed_results = SearchResults()
- 
+
         async def _search_type(ytm_filter: str | None) -> list[dict]:
             return await asyncio.to_thread(
                 self._ytmusic.search,
@@ -310,7 +310,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 filter=ytm_filter,
                 limit=limit,
             )
- 
+
         # YTM doesn't support multi-type search in a single call
         if len(media_types) == 1:
             if media_types[0] == MediaType.ARTIST:
@@ -325,7 +325,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 return parsed_results
         else:
             results = await _search_type(None)
- 
+
         for result in results:
             try:
                 result_type = result.get("resultType")
@@ -343,9 +343,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     parsed_results.tracks.append(track)
             except (InvalidDataError, KeyError, TypeError):
                 pass  # skip invalid items
- 
+
         return parsed_results
- 
+
     async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
         try:
@@ -364,14 +364,14 @@ class YoutubeMusicFreeProvider(MusicProvider):
         except Exception as e:
             self.logger.debug("get_song failed for %s: %s", prov_track_id, e)
         return self._minimal_track(prov_track_id)
- 
+
     async def get_album(self, prov_album_id: str) -> Album:
         """Get full album details by id."""
         album_obj = await asyncio.to_thread(self._ytmusic.get_album, prov_album_id)
         if not album_obj:
             raise MediaNotFoundError(f"Album {prov_album_id} not found")
         return self._parse_album(album_obj, prov_album_id)
- 
+
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get album tracks for given album id."""
         album_obj = await asyncio.to_thread(self._ytmusic.get_album, prov_album_id)
@@ -383,7 +383,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 track = self._parse_track(track_obj, track_number=track_number)
                 tracks.append(track)
         return tracks
- 
+
     async def get_artist(self, prov_artist_id: str) -> Artist:
         """Get full artist details by id."""
         # Fake IDs created when artist channel ID is unknown — return a stub
@@ -411,7 +411,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             raise
         except Exception as e:
             raise MediaNotFoundError(f"Artist {prov_artist_id} not found") from e
- 
+
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
         """Get a list of albums for the given artist."""
         artist_obj = await asyncio.to_thread(self._ytmusic.get_artist, prov_artist_id)
@@ -426,7 +426,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     ]
                 albums.append(self._parse_album(album_obj, album_obj.get("browseId")))
         return albums
- 
+
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         """Get a list of most popular tracks for the given artist."""
         artist_obj = await asyncio.to_thread(self._ytmusic.get_artist, prov_artist_id)
@@ -437,7 +437,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             playlist_tracks = await self.get_playlist_tracks(songs["browseId"])
             return playlist_tracks[:25]
         return []
- 
+
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get full playlist details by id."""
         try:
@@ -455,7 +455,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 "ytmusicapi get_playlist failed for %s, using yt-dlp fallback", prov_playlist_id
             )
             return await self._get_playlist_via_ytdlp(prov_playlist_id)
- 
+
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Return playlist tracks for the given playlist id."""
         if page > 0:
@@ -485,7 +485,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 prov_playlist_id,
             )
             return await self._get_playlist_tracks_via_ytdlp(prov_playlist_id)
- 
+
     @staticmethod
     def _yt_playlist_url(playlist_id: str) -> str:
         """Build a plain youtube.com playlist URL, stripping ytmusicapi's VL browse prefix."""
@@ -493,10 +493,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
         # yt-dlp and youtube.com expect the bare ID ("PLxxx").
         bare_id = playlist_id[2:] if playlist_id.startswith("VL") else playlist_id
         return f"https://www.youtube.com/playlist?list={bare_id}"
- 
+
     async def _get_playlist_via_ytdlp(self, playlist_id: str) -> Playlist:
         """Get playlist metadata via yt-dlp flat extraction (no auth required)."""
- 
+
         def _extract() -> dict | None:
             if self._yt_dlp_module is None:
                 self._yt_dlp_module = importlib.import_module("yt_dlp")
@@ -513,11 +513,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     return ydl.extract_info(url, download=False)
                 except Exception:
                     return None
- 
+
         info = await asyncio.to_thread(_extract)
         if not info:
             raise MediaNotFoundError(f"Playlist {playlist_id} not found")
- 
+
         playlist = Playlist(
             item_id=playlist_id,
             provider=self.instance_id,
@@ -536,10 +536,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if thumbnails := info.get("thumbnails"):
             playlist.metadata.images = self._parse_thumbnails(thumbnails)
         return playlist
- 
+
     async def _get_playlist_tracks_via_ytdlp(self, playlist_id: str) -> list[Track]:
         """Get playlist tracks via yt-dlp flat extraction (no auth required)."""
- 
+
         def _extract() -> dict | None:
             if self._yt_dlp_module is None:
                 self._yt_dlp_module = importlib.import_module("yt_dlp")
@@ -555,11 +555,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     return ydl.extract_info(url, download=False)
                 except Exception:
                     return None
- 
+
         info = await asyncio.to_thread(_extract)
         if not info or not info.get("entries"):
             return []
- 
+
         result = []
         for index, entry in enumerate(info["entries"] or [], 1):
             if not entry or not entry.get("id"):
@@ -589,7 +589,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             except (InvalidDataError, KeyError, TypeError):
                 pass
         return result
- 
+
     async def get_similar_tracks(self, prov_track_id: str, limit: int = 25) -> list[Track]:
         """Return a dynamic list of tracks based on the provided track (song radio)."""
         watch_playlist = await asyncio.to_thread(
@@ -606,20 +606,20 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 if track:
                     tracks.append(track)
         return tracks
- 
+
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Return stream details for the given track."""
         stream_format = await self._get_stream_format(item_id)
         self.logger.debug(
             "Resolved stream format '%s' for track %s", stream_format.get("format"), item_id
         )
- 
+
         url = stream_format["url"]
         expiration = DEFAULT_STREAM_URL_EXPIRATION
         if parsed := parse_qs(urlparse(url).query):
             if expire_ts := parsed.get("expire", [None])[0]:
                 expiration = int(expire_ts) - int(time.time())
- 
+
         audio_ext = stream_format.get("audio_ext") or stream_format.get("ext", "m4a")
         stream_details = StreamDetails(
             provider=self.instance_id,
@@ -640,19 +640,19 @@ class YoutubeMusicFreeProvider(MusicProvider):
             with suppress(ValueError, TypeError):
                 stream_details.audio_format.sample_rate = int(sample_rate)
         return stream_details
- 
+
     # ------------------------------------------------------------------
     # Library methods (require authentication)
     # ------------------------------------------------------------------
- 
+
     def _is_auth_lapse(self, err: Exception) -> bool:
         """Return True if the error looks like an expired or invalid cookie."""
         err_str = str(err)
         return any(marker in err_str for marker in AUTH_LAPSE_ERROR_MARKERS)
- 
+
     def _probe_session_alive(self) -> bool | None:
         """Best-effort check that the ytmusicapi session is still authenticated.
- 
+
         Returns True if the probe succeeded with account data, False if it
         responded in a logged-out shape or raised an auth-lapse error, and
         None if the probe is undetermined (method missing, transient error).
@@ -671,7 +671,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if isinstance(info, dict) and not info.get("accountName"):
             return False
         return True
- 
+
     def _record_library_count(self, category: str, count: int) -> bool:
         """Track per-category populated state; return True if previously populated."""
         if not hasattr(self, "_library_seen_nonempty"):
@@ -680,10 +680,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if count > 0:
             self._library_seen_nonempty[category] = True
         return prev
- 
+
     async def _guard_partial_auth_empty(self, category: str, count: int) -> None:
         """Raise on a suspected partial-auth empty sync to preserve MA's library cache.
- 
+
         Only fires when the category was previously populated and the current
         sync came back empty, then a side-channel probe confirms the session
         is no longer authenticated.
@@ -700,7 +700,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         )
         self._warn_library_error(f"get_library_{category}", err)
         raise err
- 
+
     def _warn_library_error(self, context: str, err: Exception) -> None:
         """Log a library-call failure, upgrading the message on suspected auth lapse."""
         if self._is_auth_lapse(err):
@@ -718,10 +718,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 self.logger.debug("%s failed (auth lapse, already warned): %s", context, err)
         else:
             self.logger.warning("%s failed: %s", context, err)
- 
+
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Get artists from the user's library (subscriptions + library artists)."""
- 
+
         if not self._authenticated:
             return
         subs: list[dict] = []
@@ -756,10 +756,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 if artist.item_id not in seen_ids:
                     seen_ids.add(artist.item_id)
                     yield artist
- 
+
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Get albums from the user's library."""
- 
+
         if not self._authenticated:
             return
         try:
@@ -773,10 +773,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
         for item in results:
             with suppress(InvalidDataError, KeyError, TypeError):
                 yield self._parse_album(item, item.get("browseId"))
- 
+
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         """Get tracks from the user's library."""
- 
+
         if not self._authenticated:
             return
         try:
@@ -792,10 +792,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 track = self._parse_track(item)
                 if track:
                     yield track
- 
+
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Get playlists from the user's library."""
- 
+
         if not self._authenticated:
             return
         try:
@@ -810,84 +810,102 @@ class YoutubeMusicFreeProvider(MusicProvider):
             with suppress(InvalidDataError, KeyError, TypeError):
                 item.setdefault("id", item.get("playlistId"))
                 yield self._parse_playlist(item)
- 
+
     async def library_add(self, item: MediaItemType) -> bool:
         """Add an item to the user's library."""
         if not self._authenticated:
             self.logger.warning("Not authenticated - cannot add to library")
             return False
- 
+
         prov_mapping = next(
             (m for m in item.provider_mappings if m.provider_instance == self.instance_id),
             None,
         )
         if not prov_mapping:
             return False
- 
+
         item_id = prov_mapping.item_id
- 
+
         try:
             if item.media_type == MediaType.ARTIST:
                 await asyncio.to_thread(self._ytmusic.subscribe_artists, [item_id])
                 self.logger.info(f"✅ Subscribed to artist: {item_id}")
- 
+
             elif item.media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
                 await asyncio.to_thread(self._ytmusic.rate_playlist, item_id, "LIKE")
                 self.logger.info(f"✅ Added {item.media_type} to library: {item_id}")
- 
-            elif item.media_type == MediaType.TRACK:                    # <--- DODANE
-                await asyncio.to_thread(self._ytmusic.rate_song, item_id, "LIKE")
-                self.logger.info(f"✅ Added track to YTM library (LIKE): {item_id}")
- 
+
+            elif item.media_type == MediaType.TRACK:
+                # rate_song requires feedbackTokens from get_song, not just videoId
+                song_info = await asyncio.to_thread(self._ytmusic.get_song, item_id)
+                feedback_tokens = song_info.get("feedbackTokens") if song_info else None
+                if feedback_tokens:
+                    await asyncio.to_thread(
+                        self._ytmusic.rate_song, item_id, "LIKE", feedback_tokens
+                    )
+                else:
+                    # Fallback: try without tokens
+                    await asyncio.to_thread(self._ytmusic.rate_song, item_id, "LIKE")
+                self.logger.info(f"Added track to YTM library (LIKE): {item_id}")
+
+
             else:
                 self.logger.warning(f"library_add not supported for {item.media_type}")
                 return False
- 
+
             return True
- 
+
         except Exception as err:
             err_str = str(err)
             if "403" in err_str:
                 self.logger.debug(f"library_add returned 403 for {item_id} (already in library)")
                 return True
- 
+
             self._warn_library_error(f"library_add for {item_id}", err)
             return False
- 
+
     async def library_remove(self, prov_item_id: str, media_type: MediaType) -> bool:
         """Remove an item from the user's library."""
         if not self._authenticated:
             return False
- 
+
         try:
             if media_type == MediaType.ARTIST:
                 await asyncio.to_thread(self._ytmusic.unsubscribe_artists, [prov_item_id])
- 
+
             elif media_type in (MediaType.ALBUM, MediaType.PLAYLIST):
                 await asyncio.to_thread(
                     self._ytmusic.rate_playlist, prov_item_id, "INDIFFERENT"
                 )
- 
-            elif media_type == MediaType.TRACK:                     # <--- DODANE
-                await asyncio.to_thread(self._ytmusic.rate_song, prov_item_id, "INDIFFERENT")
-                self.logger.info(f"✅ Removed track from YTM library: {prov_item_id}")
- 
+
+            elif media_type == MediaType.TRACK:
+                song_info = await asyncio.to_thread(self._ytmusic.get_song, prov_item_id)
+                feedback_tokens = song_info.get("feedbackTokens") if song_info else None
+                if feedback_tokens:
+                    await asyncio.to_thread(
+                        self._ytmusic.rate_song, prov_item_id, "INDIFFERENT", feedback_tokens
+                    )
+                else:
+                    await asyncio.to_thread(self._ytmusic.rate_song, prov_item_id, "INDIFFERENT")
+                self.logger.info(f"Removed track from YTM library: {prov_item_id}")
+
+
             else:
                 self.logger.warning(f"library_remove not supported for {media_type}")
                 return False
- 
+
             return True
- 
+
         except Exception as err:
             if "403" in str(err):
                 self.logger.debug(
                     f"library_remove returned 403 for {prov_item_id} (likely already removed)"
                 )
                 return True
- 
+
             self._warn_library_error(f"library_remove for {prov_item_id}", err)
             return False
- 
+
     async def recommendations(self) -> list[RecommendationFolder]:
         """Get personalized recommendations from YouTube Music home feed."""
         if not self._authenticated:
@@ -933,21 +951,21 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 )
                 folders.append(folder)
         return folders
- 
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
- 
+
     async def _get_stream_format(self, item_id: str) -> dict[str, Any]:
         """Extract the best audio stream URL via yt-dlp (no cookies required)."""
- 
+
         prefer_quality = self._prefer_quality
- 
+
         def _extract() -> dict[str, Any]:
             if self._yt_dlp_module is None:
                 self._yt_dlp_module = importlib.import_module("yt_dlp")
             yt_dlp = self._yt_dlp_module
- 
+
             url = f"{YTM_DOMAIN}/watch?v={item_id}"
             ydl_opts = {
                 "quiet": True,
@@ -967,10 +985,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     info = ydl.extract_info(url, download=False)
                 except yt_dlp.utils.DownloadError as err:
                     raise UnplayableMediaError(str(err)) from err
- 
+
                 if not info or "formats" not in info:
                     raise UnplayableMediaError(f"No formats found for {item_id}")
- 
+
                 # Build format selector: prefer m4a for best quality, fallback to any audio
                 fmt_selector_str = "m4a/bestaudio/best" if prefer_quality else "worstaudio/worst"
                 try:
@@ -981,18 +999,18 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     )
                 except Exception:
                     stream_format = None
- 
+
                 if not stream_format:
                     # Last resort: pick first audio-only format
                     audio_formats = [
                         f for f in info["formats"] if f.get("vcodec") == "none"
                     ]
                     stream_format = audio_formats[-1] if audio_formats else info["formats"][-1]
- 
+
                 return stream_format
- 
+
         return await asyncio.to_thread(_extract)
- 
+
     def _minimal_track(self, track_id: str) -> Track:
         """Return a bare-minimum Track so playback can still proceed."""
         return Track(
@@ -1017,7 +1035,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 )
             ],
         )
- 
+
     def _parse_track(self, track_obj: dict, track_number: int = 0) -> Track:
         """Parse a YTM track dict into a Track model object."""
         track_id = track_obj.get("videoId")
@@ -1043,7 +1061,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             disc_number=0,
             track_number=track_obj.get("trackNumber") or track_number or 0,
         )
- 
+
         artists_raw = track_obj.get("artists", [])
         if artists_raw:
             track.artists = [
@@ -1065,7 +1083,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             ]
         if not track.artists:
             raise InvalidDataError("Track is missing artists")
- 
+
         if track_obj.get("thumbnails"):
             track.metadata.images = self._parse_thumbnails(track_obj["thumbnails"])
         album = track_obj.get("album")
@@ -1078,13 +1096,13 @@ class YoutubeMusicFreeProvider(MusicProvider):
         elif "duration_seconds" in track_obj and str(track_obj.get("duration_seconds", "")).isdigit():
             track.duration = int(track_obj["duration_seconds"])
         return track
- 
+
     def _parse_album(self, album_obj: dict, album_id: str | None = None) -> Album:
         """Parse a YTM album dict into an Album model object."""
         album_id = album_id or album_obj.get("id") or album_obj.get("browseId")
         if not album_id:
             raise InvalidDataError("Album is missing an ID")
- 
+
         title_raw = album_obj.get("title") or album_obj.get("name") or ""
         name, version = parse_title_and_version(title_raw)
         album = Album(
@@ -1130,7 +1148,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if inferred in (AlbumType.SOUNDTRACK, AlbumType.LIVE):
             album.album_type = inferred
         return album
- 
+
     def _parse_artist(self, artist_obj: dict) -> Artist:
         """Parse a YTM artist dict into an Artist model object."""
         artist_id = (
@@ -1159,7 +1177,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         if artist_obj.get("thumbnails"):
             artist.metadata.images = self._parse_thumbnails(artist_obj["thumbnails"])
         return artist
- 
+
     def _parse_playlist(self, playlist_obj: dict) -> Playlist:
         """Parse a YTM playlist dict into a Playlist model object."""
         # ytmusicapi uses different key names depending on context:
@@ -1200,7 +1218,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         else:
             playlist.owner = self.name
         return playlist
- 
+
     def _parse_thumbnails(self, thumbnails_obj: list[dict]) -> list[MediaItemImage]:
         """Convert YTM thumbnail list to MediaItemImage list."""
         result: list[MediaItemImage] = []
@@ -1235,7 +1253,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 )
             )
         return result
- 
+
     def _get_item_mapping(self, media_type: MediaType, key: str, name: str) -> ItemMapping:
         return ItemMapping(
             media_type=media_type,
@@ -1243,7 +1261,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
             provider=self.instance_id,
             name=name,
         )
- 
+
     def _get_artist_item_mapping(self, artist_obj: dict) -> ItemMapping:
         artist_id = artist_obj.get("id") or artist_obj.get("channelId")
         if not artist_id and artist_obj.get("name") == "Various Artists":
@@ -1251,7 +1269,7 @@ class YoutubeMusicFreeProvider(MusicProvider):
         return self._get_item_mapping(
             MediaType.ARTIST, artist_id or "", artist_obj.get("name", "Unknown")
         )
- 
+
     async def _install_packages(self) -> None:
         """Install required packages if not already present."""
         for pkg in ("yt-dlp[default]", "ytmusicapi", "duration-parser"):
