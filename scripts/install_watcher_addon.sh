@@ -12,7 +12,7 @@
 
 set -eu
 
-REPO_OWNER="sproft"
+REPO_OWNER="Controli-pl"
 REPO_NAME="music-assistant-ytmusic"
 ADDON_SLUG="ma_provider_watcher"
 ADDON_NAME="MA Provider Watcher"
