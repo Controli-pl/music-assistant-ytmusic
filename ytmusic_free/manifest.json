@@ -2,7 +2,7 @@
   "type": "music",
   "domain": "ytmusic_free",
   "stage": "experimental",
-  "name": "YouTube Music (Free)",
+  "name": "YouTube Music (Free) Like",
   "description": "Stream YouTube Music without a premium subscription. Uses yt-dlp for audio extraction. Optional browser cookie auth unlocks library sync and recommendations.",
   "codeowners": ["sproft"],
   "documentation": "https://github.com/sproft/music-assistant-ytmusic/blob/main/README.md",
