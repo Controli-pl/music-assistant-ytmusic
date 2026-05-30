@@ -26,7 +26,7 @@ Music Assistant runs as a Docker container (HA add-on). The provider files must 
 One-line install from a shell with **host Docker access**. On Home Assistant OS that means the **Advanced SSH & Web Terminal** community add-on with **Protection mode off** (the official Terminal & SSH add-on is sandboxed and cannot reach Docker, so the script aborts with `required command not found: docker`). On a Supervised install, a normal root SSH session works:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_provider.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Controli-pl/music-assistant-ytmusic/main/scripts/install_provider.sh | sh
 ```
 
 The script auto-detects your MA container ID, Python version, and `/config` path, downloads the latest provider, stages it under `/config/custom_components/mass/providers/`, copies it into the MA container, and restarts MA. Re-run anytime to upgrade.
@@ -79,13 +79,13 @@ Go to **Settings → Apps → Add** in the MA UI. You should see **"YouTube Musi
 If you restart HA (not just MA), the container is recreated and the provider files are lost. The recommended fix is the **MA Provider Watcher** local add-on, which re-copies the provider whenever the MA container is recreated. One-line install from a host shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Controli-pl/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh
 ```
 
 To re-install or upgrade an existing watcher add-on without the overwrite prompt, pass `--force` through to the script with `sh -s --`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sproft/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh -s -- --force
+curl -fsSL https://raw.githubusercontent.com/Controli-pl/music-assistant-ytmusic/main/scripts/install_watcher_addon.sh | sh -s -- --force
 ```
 
 > Note the `sh -s --` separator. Writing `... | sh --force` makes the shell parse `--force` as one of its own options and fail with `sh: bad option '--force'`.
