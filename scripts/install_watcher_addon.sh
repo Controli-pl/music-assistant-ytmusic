@@ -16,7 +16,11 @@ REPO_OWNER="Controli-pl"
 REPO_NAME="music-assistant-ytmusic"
 ADDON_SLUG="ma_provider_watcher"
 ADDON_NAME="MA Provider Watcher"
-ADDON_VERSION="1.0.0"
+# Stamp a fresh, strictly-increasing version on every run so Home Assistant sees
+# a newer version and rebuilds the add-on image. Without this the version stays
+# pinned, so re-running the installer (e.g. to fix the Python version or MA ID)
+# silently keeps the stale cached image with the old run.sh -- issue #22.
+ADDON_VERSION="1.0.$(date +%Y%m%d%H%M%S)"
 
 REF="main"
 FORCE=0
@@ -28,12 +32,26 @@ log()  { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
+# A candidate is only usable if it is a directory we can actually write into.
+# Some add-ons mount the add-ons share read-only (or owned by another uid), so
+# [ -d ] alone would pick a dir the install then fails to write -- probe for real.
+writable_dir() {
+    [ -d "$1" ] || return 1
+    _probe="$1/.maw_write_test.$$"
+    if ( : > "$_probe" ) 2>/dev/null; then
+        rm -f "$_probe" 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
 usage() {
     cat <<EOF
 Usage: sh install_watcher_addon.sh [options]
 
 Options:
   --force, -f               Overwrite existing add-on directory without prompting
+  --repo-owner OWNER        Repository owner (default: sproft)
   --ref REF                 Git ref (branch/tag/commit) to download (default: main)
   --ma-id ID                Music Assistant container ID (default: auto-detect)
   --python-version VER      MA Python version, e.g. python3.13 (default: auto-detect)
@@ -45,6 +63,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --force|-f) FORCE=1 ;;
+        --repo-owner) shift; REPO_OWNER="${1:-}" ;;
         --ref) shift; REF="${1:-}" ;;
         --ma-id) shift; MA_ID="${1:-}" ;;
         --python-version) shift; PYTHON_VERSION="${1:-}" ;;
@@ -67,14 +86,44 @@ need rm
 # --- Detect add-ons directory -----------------------------------------------
 
 if [ -z "$ADDONS_DIR" ]; then
-    if [ -d /mnt/data/supervisor/addons/local ]; then
-        ADDONS_DIR="/mnt/data/supervisor/addons/local"
-        log "Detected HAOS add-ons path: $ADDONS_DIR"
-    elif [ -d /root/addons ]; then
-        ADDONS_DIR="/root/addons"
-        log "Detected Supervised add-ons path: $ADDONS_DIR"
-    else
-        die "could not find local add-ons directory. Pass --addons-dir explicitly."
+    # Probe known local add-ons locations, most-standard first. Notes:
+    #  - Inside the SSH / Samba / Terminal add-on (the common case) the local
+    #    repo is mapped to /addons; host paths below are invisible there.
+    #  - HA renamed the Supervisor "addons" tree to "apps" (HAOS 18+, mirroring
+    #    `ha apps` replacing the deprecated `ha addons`), so the modern layout is
+    #    .../apps/local while older installs still use .../addons/local.
+    #  - Supervised reads its data share from /etc/hassio.json ("data" key);
+    #    the default moved from /usr/share/hassio to /var/lib/homeassistant.
+    # /root/addons (a prior fallback) is intentionally dropped: it is not used by
+    # any supported install type.
+    _data_share=""
+    if [ -r /etc/hassio.json ]; then
+        _data_share="$(sed -n 's/.*"data" *: *"\([^"]*\)".*/\1/p' \
+                       /etc/hassio.json 2>/dev/null | head -n1)"
+    fi
+    for _cand in \
+        /addons \
+        /addons/local \
+        /data/apps/local \
+        /data/addons/local \
+        /mnt/data/supervisor/apps/local \
+        /mnt/data/supervisor/addons/local \
+        ${_data_share:+"$_data_share/apps/local" "$_data_share/addons/local"} \
+        /var/lib/homeassistant/apps/local \
+        /var/lib/homeassistant/addons/local \
+        /usr/share/hassio/apps/local \
+        /usr/share/hassio/addons/local
+    do
+        [ -d "$_cand" ] || continue
+        if writable_dir "$_cand"; then
+            ADDONS_DIR="$_cand"
+            log "Detected local add-ons path: $ADDONS_DIR"
+            break
+        fi
+        log "WARN: $_cand exists but is not writable; skipping."
+    done
+    if [ -z "$ADDONS_DIR" ]; then
+        die "could not find a writable local add-ons directory (probed /addons, /data/{apps,addons}/local, /mnt/data/supervisor/{apps,addons}/local, /var/lib/homeassistant/{apps,addons}/local, /usr/share/hassio/{apps,addons}/local). Pass --addons-dir explicitly. Inside the SSH/Samba add-on use --addons-dir /addons; on the HAOS host console use --addons-dir /mnt/data/supervisor/apps/local."
     fi
 else
     [ -d "$ADDONS_DIR" ] || die "add-ons directory does not exist: $ADDONS_DIR"
@@ -283,9 +332,18 @@ cat <<EOF
 Next steps:
   1. In Home Assistant: Settings -> Add-ons -> Add-on Store
      (three-dot menu) -> Check for updates.
-  2. Open "$ADDON_NAME" under Local add-ons and click Install.
+  2. Open "$ADDON_NAME" under Local add-ons.
+       First install:  click Install.
+       Re-installing:  click Rebuild (three-dot menu) so the new run.sh and
+                       provider files are baked into the image. A running
+                       add-on keeps its old cached image until you rebuild.
   3. On the Info tab, turn Protection mode OFF (required for Docker socket access).
   4. Start the add-on and check the logs for "Copied OK" / "MA restarted".
+
+This installer stamped version $ADDON_VERSION so Home Assistant detects the
+change. If you re-ran to fix the MA container ID or Python version and the
+add-on still uses the old value, Rebuild it (step 2) -- "Check for updates"
+alone does not rebuild a cached local add-on image.
 
 If MA container ID or Python version was wrong, re-run with:
   sh install_watcher_addon.sh --force --ma-id <ID> --python-version <pythonX.Y>
